@@ -71,12 +71,12 @@ BLACKLISTED_DOMAINS = {
 }
 
 DISCOVERY_QUERIES = [
-    "computer science fellowship  apply",
-    "AI internship for students ",
-    "summer research program computer science ",
-    "undergraduate research internship India ",
-    "open source mentorship program ",
-    "engineering fellowship for students ",
+    "computer science fellowship apply",
+    "AI internship for students",
+    "summer research program computer science",
+    "undergraduate research internship India",
+    "open source mentorship program",
+    "engineering fellowship for students",
     "research internship Bangalore computer science",
     "remote AI fellowship students",
 ]
@@ -166,6 +166,7 @@ def normalize_url(url: str) -> str:
 def generate_queries_with_ai() -> list[dict]:
     print("\nGemini is generating search queries...")
     programs_list = "\n".join(f"- {p}" for p in MUST_HAVE_PROGRAMS)
+    current_year = datetime.now(timezone.utc).year
 
     prompt = f"""You are helping find tech fellowships for Indian CS students in Bangalore.
 
@@ -198,13 +199,13 @@ Return ONLY this JSON with no extra text or markdown:
     raw = ask_ai(prompt, max_tokens=3000)
     if not raw:
         print("Gemini unavailable, using fallback queries.")
-        return [{"name": p, "queries": [f"{p} 2026 official application", f"{p} deadline 2026"]}
+        return [{"name": p, "queries": [f"{p} {current_year} official application", f"{p} deadline {current_year}"]}
                 for p in MUST_HAVE_PROGRAMS]
 
     data = safe_parse_json(raw)
     if not data or not isinstance(data, dict):
         print("JSON parse failed, using fallback queries.")
-        return [{"name": p, "queries": [f"{p} 2026 official application", f"{p} deadline 2026"]}
+        return [{"name": p, "queries": [f"{p} {current_year} official application", f"{p} deadline {current_year}"]}
                 for p in MUST_HAVE_PROGRAMS]
 
     combined = data.get("must_have", []) + data.get("additional", [])
@@ -292,8 +293,8 @@ def generate_dynamic_queries():
     ]
 
     templates = [
-        "{} fellowship students ",
-        "{} internship undergraduate ",
+        "{} fellowship students",
+        "{} internship undergraduate",
         "{} research internship apply",
         "{} student mentorship program"
     ]
@@ -566,7 +567,10 @@ async def main():
         for path in generate_domain_paths(domain):
             scored_links.append((85, normalize_url(path)))
 
-    scored_links = list(set(scored_links))
+    score_by_url = {}
+    for score, url in scored_links:
+        score_by_url[url] = max(score_by_url.get(url, 0), score)
+    scored_links = [(score, url) for url, score in score_by_url.items()]
     scored_links.sort(key=lambda item: item[0], reverse=True)
     existing_urls = await get_existing_urls()
     new_links = [(score, url) for score, url in scored_links if url not in existing_urls]
@@ -574,10 +578,7 @@ async def main():
         (
             max(
                 80,
-                next(
-                    (score for score, candidate in scored_links if candidate == url),
-                    get_domain_score(url),
-                ),
+                score_by_url.get(url, get_domain_score(url)),
             ),
             url,
         )
