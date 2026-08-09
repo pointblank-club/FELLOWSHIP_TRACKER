@@ -120,6 +120,17 @@ Open **http://localhost:8000** in your browser.
 
 > You do NOT need to run `python -m http.server`. FastAPI serves the frontend directly.
 
+### WhatsApp alerts
+
+The scraper can notify the WhatsApp bot when it inserts a new opportunity or when an existing opportunity changes from closed to open. Configure these variables in `.env`:
+
+```env
+WHATSAPP_ALERT_URL=http://127.0.0.1:8082/fellowship-alert
+WHATSAPP_ALERT_SECRET=the_same_secret_used_by_the_whatsapp_bot
+```
+
+The bot must be running and reachable at that URL. Alerts are authenticated with the `X-Fellowship-Alert-Secret` header, and the bot deduplicates repeated deliveries using the supplied idempotency key.
+
 ---
 
 ## Deploying to Vercel
