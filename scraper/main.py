@@ -12,7 +12,13 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
 from groq import Groq
+from scraper.dates import calculate_is_open
 from scraper.discord import send_discord_notification
+from scraper.whatsapp import (
+    classify_opportunity_event,
+    make_idempotency_key,
+    send_whatsapp_alert,
+)
 
 # ─────────────────────────── ENV SETUP ───────────────────────────
 env_path = Path(__file__).parent.parent / '.env'
@@ -21,6 +27,8 @@ load_dotenv(dotenv_path=env_path)
 MONGO_URL  = os.getenv("MONGO_URL")
 SERPER_KEY = os.getenv("SERPER_API_KEY")
 GROQ_KEY    = os.getenv("GROQ_API_KEY")
+WHATSAPP_ALERT_URL = os.getenv("WHATSAPP_ALERT_URL")
+WHATSAPP_ALERT_SECRET = os.getenv("WHATSAPP_ALERT_SECRET")
 
 mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
 db           = mongo_client.fellowship_tracker
@@ -63,12 +71,12 @@ BLACKLISTED_DOMAINS = {
 }
 
 DISCOVERY_QUERIES = [
-    "computer science fellowship 2026 apply",
-    "AI internship for students 2026",
-    "summer research program computer science 2026",
-    "undergraduate research internship India 2026",
-    "open source mentorship program 2026",
-    "engineering fellowship for students 2026",
+    "computer science fellowship apply",
+    "AI internship for students",
+    "summer research program computer science",
+    "undergraduate research internship India",
+    "open source mentorship program",
+    "engineering fellowship for students",
     "research internship Bangalore computer science",
     "remote AI fellowship students",
 ]
@@ -158,13 +166,20 @@ def normalize_url(url: str) -> str:
 def generate_queries_with_ai() -> list[dict]:
     print("\nGemini is generating search queries...")
     programs_list = "\n".join(f"- {p}" for p in MUST_HAVE_PROGRAMS)
+    current_year = datetime.now(timezone.utc).year
 
     prompt = f"""You are helping find tech fellowships for Indian CS students in Bangalore.
 
+Today is {datetime.now(timezone.utc).date().isoformat()}. The current cycle is
+{datetime.now(timezone.utc).year}-{datetime.now(timezone.utc).year + 1}. Search for
+opportunities that are current or upcoming from today onward across all years,
+using the dates and cycle stated on each official page.
+Do not target expired, archived, or previous-cycle opportunities.
+
 For each program below, generate exactly 3 Google search queries:
-1. One targeting the official application page
-2. One targeting 2026 or 2027 deadlines
-3. One targeting eligibility for Indian students
+1. One targeting the current official application page, not an archived page
+2. One targeting a current or upcoming deadline in the current or next cycle
+3. One targeting current eligibility and application details for Indian students
 Programs:
 {programs_list}
 
@@ -184,13 +199,13 @@ Return ONLY this JSON with no extra text or markdown:
     raw = ask_ai(prompt, max_tokens=3000)
     if not raw:
         print("Gemini unavailable, using fallback queries.")
-        return [{"name": p, "queries": [f"{p} 2026 official application", f"{p} deadline 2026"]}
+        return [{"name": p, "queries": [f"{p} {current_year} official application", f"{p} deadline {current_year}"]}
                 for p in MUST_HAVE_PROGRAMS]
 
     data = safe_parse_json(raw)
     if not data or not isinstance(data, dict):
         print("JSON parse failed, using fallback queries.")
-        return [{"name": p, "queries": [f"{p} 2026 official application", f"{p} deadline 2026"]}
+        return [{"name": p, "queries": [f"{p} {current_year} official application", f"{p} deadline {current_year}"]}
                 for p in MUST_HAVE_PROGRAMS]
 
     combined = data.get("must_have", []) + data.get("additional", [])
@@ -278,8 +293,8 @@ def generate_dynamic_queries():
     ]
 
     templates = [
-        "{} fellowship students 2026",
-        "{} internship undergraduate 2026",
+        "{} fellowship students",
+        "{} internship undergraduate",
         "{} research internship apply",
         "{} student mentorship program"
     ]
@@ -305,6 +320,7 @@ def ai_relevance_check(links: list[str]) -> list[str]:
 
         prompt = f"""You are filtering URLs for a fellowship/internship tracker for Indian CS students.
 
+Today is {datetime.now(timezone.utc).date().isoformat()}.
 Be LENIENT — when in doubt, KEEP the link.
 
 KEEP if the URL could lead to:
@@ -317,6 +333,7 @@ SKIP ONLY if clearly:
 - A job aggregator listing (Naukri, Internshala, Unstop, Glassdoor, Indeed)
 - Pure social media post
 - Completely unrelated to fellowships/internships
+- Clearly an archived or previous-cycle page with no current or upcoming opportunity
 
 Return ONLY a JSON array of numbers to keep. Example: [1, 2, 4, 5, 7]
 No explanation, no markdown.
@@ -390,16 +407,24 @@ async def process_link(crawler, run_cfg, link: str, score: int, semaphore: async
             if not details:
                 return
 
-            is_open = details.get("is_open")
-            if isinstance(is_open, str):
-                is_open = is_open.lower() in ["true", "open", "yes"]
-            else:
-                is_open = bool(is_open)
+            application_start = (
+                details.get("application_start")
+                or details.get("start_date")
+                or "Check Website"
+            )
+            deadline = details.get("deadline") or "Check Website"
+            is_open = calculate_is_open(
+                application_start,
+                deadline,
+                details.get("is_open"),
+                today=datetime.now(timezone.utc).date(),
+            )
 
             doc = {
                 "name":         details.get("name") or "Unknown Opportunity",
                 "organization": details.get("organization"),
-                "deadline":     details.get("deadline", "Check Website"),
+                "application_start": application_start,
+                "deadline":     deadline,
                 "stipend":      details.get("stipend"),
                 "eligibility":  details.get("eligibility"),
                 "mode":         details.get("mode"),
@@ -409,11 +434,34 @@ async def process_link(crawler, run_cfg, link: str, score: int, semaphore: async
                 "trust_score":  score,
                 "last_updated": datetime.now(timezone.utc),
             }
+            previous = await collection.find_one(
+                {"apply_link": link},
+                {"is_open": 1, "_id": 0},
+            )
             result_db = await collection.update_one({"apply_link": link}, {"$set": doc}, upsert=True)
+            is_new = result_db.upserted_id is not None
+            alert_event = classify_opportunity_event(
+                previous,
+                is_new=is_new,
+                is_open=is_open,
+            )
 
-            if result_db.upserted_id is not None:
-              print(f"New opportunity! Sending Discord notification...")
-              await send_discord_notification(doc)
+            if is_new:
+                print(f"New opportunity! Sending Discord notification...")
+                await send_discord_notification(doc)
+            if alert_event:
+                alert_key = make_idempotency_key(
+                    alert_event,
+                    link,
+                    doc["last_updated"],
+                )
+                await send_whatsapp_alert(
+                    doc,
+                    event=alert_event,
+                    idempotency_key=alert_key,
+                    url=WHATSAPP_ALERT_URL,
+                    secret=WHATSAPP_ALERT_SECRET,
+                )
 
             print(f"Saved: {doc['name']}  |  Deadline: {doc['deadline']}")
 
@@ -427,6 +475,13 @@ def ai_extract_details(page_text: str, url: str) -> dict:
     prompt = f"""
 Extract opportunity data from this webpage.
 
+Today is {datetime.now(timezone.utc).date().isoformat()}. The current cycle is
+{datetime.now(timezone.utc).year}-{datetime.now(timezone.utc).year + 1}.
+Use the actual current page content, not search-result snippets, examples, or
+old cached details. 
+If this is a valid opportunity page but its application window has already closed, still return the full opportunity details with "is_open": false so
+the database can be updated. Return {{ "is_opportunity": false }} only when the page is unrelated to an opportunity.
+
 If the page is NOT about a fellowship, internship,
 research program, mentorship, or scholarship,
 return:
@@ -439,12 +494,17 @@ Otherwise return:
   "is_opportunity": true,
   "name": "Full program name",
   "organization": "Sponsoring organization",
+  "application_start": "YYYY-MM-DD or Check Website or Rolling",
   "deadline": "YYYY-MM-DD or Check Website or Rolling",
   "stipend": "Amount or Unpaid or Not Specified",
   "eligibility": "1-2 sentence summary",
   "mode": "Remote or In-Person or Hybrid",
+  "is_open": true,
   "tags": ["tag1", "tag2"]
 }}
+Extract the application opening date and deadline from the page. Set
+"is_open" to true only when today is on or after application_start and on or
+before deadline. If either date is unavailable, use the page's explicit status.
 
 URL:
 {url}
@@ -507,15 +567,32 @@ async def main():
         for path in generate_domain_paths(domain):
             scored_links.append((85, normalize_url(path)))
 
-    scored_links = list(set(scored_links))
+    score_by_url = {}
+    for score, url in scored_links:
+        score_by_url[url] = max(score_by_url.get(url, 0), score)
+    scored_links = [(score, url) for url, score in score_by_url.items()]
+    scored_links.sort(key=lambda item: item[0], reverse=True)
     existing_urls = await get_existing_urls()
-    
-    fresh_links = [(sc, url) for sc, url in scored_links if url not in existing_urls]
-    print(f" {len(fresh_links)} new links to process ({len(scored_links) - len(fresh_links)} already in DB, skipping)\n")
+    new_links = [(score, url) for score, url in scored_links if url not in existing_urls]
+    refresh_links = [
+        (
+            max(
+                80,
+                score_by_url.get(url, get_domain_score(url)),
+            ),
+            url,
+        )
+        for url in existing_urls
+    ]
+    print(
+        f" {len(new_links)} new links and {len(refresh_links)} existing links available for processing\n"
+    )
 
-    top_urls   = [url for _, url in fresh_links[:150]]
-    final_urls = top_urls
-    score_map  = {url: sc for sc, url in scored_links}
+    # Revisit every stored link so its application window and database status
+    # are refreshed even when search no longer returns the old URL.
+    final_pairs = sorted(new_links, reverse=True)[:150] + refresh_links
+    final_urls = [url for _, url in final_pairs]
+    score_map  = {url: score for score, url in final_pairs}
 
     print(f"\n Crawling {len(final_urls)} pages...\n")
     semaphore = asyncio.Semaphore(3)
