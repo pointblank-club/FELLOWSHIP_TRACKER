@@ -9,14 +9,17 @@ def classify_opportunity_event(
     is_new: bool,
     is_open: bool,
 ) -> str | None:
-    """Return the alert event for a newly inserted or newly opened record."""
+    """Return the alert event for a record that is inserted open or becomes open."""
+    if not is_open:
+        return None
     if is_new:
         return "new"
     # Only an explicit closed state is a reopen. Missing status on legacy
     # records should not produce a burst of alerts after this integration is
     # enabled for the first time.
-    if previous is not None and previous.get("is_open") is False and is_open:
-        return "reopened"
+    if previous is not None and previous.get("is_open") is False:
+        # Records saved while closed were never announced, so their first opening is "new".
+        return "reopened" if previous.get("alerted_at") else "new"
     return None
 
 def make_idempotency_key(event: str, apply_link: str, last_updated: datetime) -> str:

@@ -111,3 +111,10 @@ def calculate_is_open(
     if isinstance(model_value, str):
         return model_value.strip().lower() in {"true", "open", "yes"}
     return bool(model_value)
+
+def has_known_deadline(deadline_value) -> bool:
+    """True when the deadline is a real date or explicitly rolling, not "Check Website"."""
+    if parse_opportunity_date(deadline_value, end=True) is not None:
+        return True
+    text = str(deadline_value or "").strip().lower()
+    return any(rolling in text for rolling in _ROLLING)

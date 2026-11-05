@@ -51,7 +51,15 @@
         <h1 class="text-5xl md:text-7xl font-bold text-white tracking-tighter">
             Fellowship <span class="pb-green">Tracker</span>
         </h1>
-        <p class="text-gray-500 text-xs mt-2 tracking-widest">[ BANGALORE / INDIA / 2025-2026 ]</p>
+        <p class="text-gray-500 text-xs mt-2 tracking-widest">[ BANGALORE / INDIA / <span id="cycle">2025-2026</span> ]</p>
+        <script>
+            // Current application cycle (this year and next), the same one the scraper searches for.
+            {
+                const year = new Date().getFullYear();
+                document.getElementById("cycle").textContent = `${year}-${year + 1}`;
+                document.title = `Fellowship Tracker ${year}`;
+            }
+        </script>
     </header>
 
     <!-- Stats Bar -->
