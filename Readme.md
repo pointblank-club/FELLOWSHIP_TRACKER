@@ -105,7 +105,7 @@ GEMINI_API_KEY=your_gemini_key
 ### Step 1 — Run the scraper (populates MongoDB)
 
 ```bash
-python scraper/main.py
+python -m scraper.main
 ```
 
 This will take 20–60 minutes on the free Gemini tier due to rate limiting. The scraper handles this automatically with exponential backoff — just let it run.
